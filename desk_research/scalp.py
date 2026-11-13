@@ -17,7 +17,7 @@ def load_m1():
 
 def scalp(m, entries, tp, sl, amb="stop", max_min=None, cost=None):
     """entries: list of (utc_time_of_signal_bar_close, dir). Fill at first M1 open at/after that time."""
-    t = m.index.view("int64") // 10**9; o, h, l, c = m.open.to_numpy(), m.high.to_numpy(), m.low.to_numpy(), m.close.to_numpy()
+    t = W.epoch(m.index); o, h, l, c = m.open.to_numpy(), m.high.to_numpy(), m.low.to_numpy(), m.close.to_numpy()
     spr = m.spread_points.to_numpy() / 100.0 if cost is None else np.full(len(o), cost)
     out = []; busy_until = -1
     for ts, d in entries:
@@ -49,7 +49,7 @@ def st(tr):
 
 def main():
     df = W.load(); sig, atr, bias = W.signals(df, True, (1, 21))
-    t_close = (df.index.view("int64") // 10**9) + 3600
+    t_close = W.epoch(df.index) + 3600
     entries = [(int(t_close[j]), int(sig[j])) for j in range(len(sig)) if sig[j] != 0]
     m = load_m1()
     print(f"M1 bars {len(m)}, {len(entries)} live entries, spread median ${m.spread_points.median()/100:.2f}\n")
@@ -88,7 +88,7 @@ def main():
     rng = np.random.default_rng(1); idx = np.arange(0, len(m) - 1000); nets = []
     for _ in range(200):
         pk = np.sort(rng.choice(idx, size=len(entries), replace=False))
-        ent = [(int(m.index.view('int64')[j] // 10**9), int(rng.choice([-1, 1]))) for j in pk]
+        mt = W.epoch(m.index); ent = [(int(mt[j]), int(rng.choice([-1, 1]))) for j in pk]
         nets.append(scalp(m, ent, 3, 3).pnl.sum())
     live = st(grid[(3, 3)])["net"]; nets = np.array(nets)
     print(f"  live entries ${live:.0f} vs random median ${np.median(nets):.0f} [5..95%: ${np.percentile(nets,5):.0f}..${np.percentile(nets,95):.0f}]")

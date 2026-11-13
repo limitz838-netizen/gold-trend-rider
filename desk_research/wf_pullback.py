@@ -21,6 +21,14 @@ WIN_H4 = 1000          # same as worker Cfg.H4_BARS
 TP_MIN = S.TP_MIN_POINTS   # 13 points per 0.01 lot
 
 # ---------------------------------------------------------------- data
+
+def epoch(idx):
+    """UTC epoch seconds from a DatetimeIndex, whatever its stored resolution (pandas 3 uses microseconds)."""
+    idx = pd.DatetimeIndex(idx)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    return np.asarray(idx.values.astype("datetime64[s]").astype("int64"))
+
 def load():
     if H4_CSV:   # broker export: plain header, UTC index, Spread column (points)
         df = pd.read_csv(CSV, index_col=0, parse_dates=True)
@@ -37,7 +45,7 @@ def load():
 
 
 def bars_of(df):
-    t = (df.index.view("int64") // 10**9).astype(int)
+    t = epoch(df.index)
     return [dict(t=int(a), o=float(b), h=float(c), l=float(d), c=float(e))
             for a, b, c, d, e in zip(t, df.Open, df.High, df.Low, df.Close)]
 
