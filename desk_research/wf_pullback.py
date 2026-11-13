@@ -11,7 +11,10 @@ import numpy as np, pandas as pd
 sys.path.insert(0, "/home/user/nolimitz_backend")
 from app.desk import strategy as S
 
-CSV = "/home/user/gold-trend-rider/data/gold_1h.csv"
+import os
+CSV = os.environ.get("H1_CSV", "/home/user/gold-trend-rider/data/gold_1h.csv")
+H4_CSV = os.environ.get("H4_CSV")   # broker-aligned H4 bars (UTC open time); else resampled from H1
+SPREAD_COL = True                   # use the bar's real spread as the trade cost when present
 COST = 0.30            # $ per 0.01-lot round trip (spread + commission). Exness standard gold ~0.2-0.35
 WIN_H1 = 400           # H1 bars passed to evaluate(): EMA20/ATR14 fully converged (0.9^400 ~ 0)
 WIN_H4 = 1000          # same as worker Cfg.H4_BARS
@@ -19,6 +22,11 @@ TP_MIN = S.TP_MIN_POINTS   # 13 points per 0.01 lot
 
 # ---------------------------------------------------------------- data
 def load():
+    if H4_CSV:   # broker export: plain header, UTC index, Spread column (points)
+        df = pd.read_csv(CSV, index_col=0, parse_dates=True)
+        df.index = pd.to_datetime(df.index, utc=True)
+        df = df[["Open", "High", "Low", "Close", "Spread"]].dropna()
+        return df[(df.High >= df.Low) & (df.Close > 0)]
     df = pd.read_csv(CSV, header=[0, 1], index_col=0)
     df.columns = [c[0] for c in df.columns]
     df.index = pd.to_datetime(df.index, utc=True)
@@ -45,7 +53,10 @@ def h4_from_h1(df):
 def signals(df, loose, session, regime=(S.ATR_RATIO_MIN, S.ATR_RATIO_MAX)):
     """For every H1 bar i (closed), the Decision of the live strategy. Returns arrays sig, atr, bias."""
     h1 = bars_of(df)
-    h4df = h4_from_h1(df)
+    if H4_CSV:
+        h4df = pd.read_csv(H4_CSV, index_col=0, parse_dates=True); h4df.index = pd.to_datetime(h4df.index, utc=True)
+    else:
+        h4df = h4_from_h1(df)
     h4 = bars_of(h4df)
     h4_close_t = np.array([b["t"] + 4 * 3600 for b in h4])      # when each H4 bar is closed
     old = (S.ATR_RATIO_MIN, S.ATR_RATIO_MAX)
@@ -71,6 +82,7 @@ def simulate(df, sig, atr, bias, stop_mult, tp_min, flip_exit=True, entries=None
     """One position at a time. Signal on bar i close -> fill at bar i+1 open. Stop/target checked on each
     bar's high/low (stop first if both hit). H4 flip closes at the next bar open. Returns trade list."""
     o, h, l, c = df.Open.to_numpy(), df.High.to_numpy(), df.Low.to_numpy(), df.Close.to_numpy()
+    spr = (df.Spread.to_numpy() / 100.0) if ("Spread" in df and cost is COST) else np.full(len(o), cost)
     n = len(o); trades = []; i = 0
     ent = entries if entries is not None else [(j, int(sig[j])) for j in range(n) if sig[j] != 0]
     ptr = 0
@@ -95,7 +107,7 @@ def simulate(df, sig, atr, bias, stop_mult, tp_min, flip_exit=True, entries=None
             k += 1
         if exit_px is None:
             exit_px, reason, k = c[-1], "open", n - 1
-        pnl = d * (exit_px - px) - cost
+        pnl = d * (exit_px - px) - spr[j + 1]
         trades.append(dict(entry_i=j + 1, exit_i=k, t=df.index[j + 1], dir=d, pnl=pnl, r=pnl / (stop_mult * a),
                            reason=reason, hold=k - j))
         i = k + 1   # worker re-arms on the next bar after the close
@@ -126,7 +138,7 @@ def window(tr, a, b):
 # ---------------------------------------------------------------- main
 def main():
     df = load()
-    print(f"GC=F H1 {df.index[0]:%Y-%m-%d} -> {df.index[-1]:%Y-%m-%d}, {len(df)} bars, cost ${COST}/trade\n")
+    print(f"{os.path.basename(CSV)} {df.index[0]:%Y-%m-%d} -> {df.index[-1]:%Y-%m-%d}, {len(df)} bars, cost = {'real bar spread' if H4_CSV else COST}\n")
 
     ENTRY_GRID = {"loose": [False, True], "session": [(7, 20), (1, 21), (0, 24)]}
     EXIT_GRID = {"stop": [1.0, 1.5, 2.0], "tp_min": [0.0, 8.0, 13.0, 20.0]}
@@ -154,7 +166,7 @@ def main():
     print("LIVE rule pullback_s (loose, 01-21 UTC, stop 1.5 ATR, TP max($13, 1 ATR), H4 flip exit), per 0.01 lot")
     print("  whole period :", fmt(stats(live)))
     print("  30 Oct rule  :", fmt(stats(old)), "  (break trigger, 07-20 UTC)")
-    periods = [("May24-Jul25", "2024-06-24", "2025-08-01"), ("Aug25-Jan26", "2025-08-01", "2026-02-01"),
+    periods = [("May24-Jul25", "2024-05-01", "2025-08-01"), ("Aug25-Jan26", "2025-08-01", "2026-02-01"),
                ("Jan26-Oct26", "2026-02-01", "2026-11-01"), ("Nov26 (after the 2 Nov change)", "2026-11-01", "2026-12-01")]
     print("\n  Periods quoted in the strategy.py comment (their numbers: live +250/+352/+869, old -96/+180/+292):")
     for name, a, b in periods:
@@ -168,7 +180,7 @@ def main():
     # ---- 2) walk-forward: pick the config on the past, trade the next quarter blind
     print("\nWALK-FORWARD: every quarter, pick the best of 72 configs on ALL prior data (by net $, min 40 trades),"
           "\n  then trade the next quarter with it. The live config's score in the same quarter is shown beside it.")
-    starts = pd.date_range("2025-04-01", "2026-10-01", freq="QS", tz="UTC")
+    starts = pd.date_range(os.environ.get("WF_START", "2025-04-01"), "2026-10-01", freq="QS", tz="UTC")
     wf_rows = []
     for a in starts:
         b = a + pd.offsets.QuarterBegin(startingMonth=1)
@@ -186,7 +198,7 @@ def main():
     print(f"  stitched blind quarters: walk-forward ${wf.picked_net.sum():.1f} | live config ${wf.live_net.sum():.1f}")
 
     # how special is the live config? rank among all 72 on each half
-    mid = pd.Timestamp("2025-09-01", tz="UTC")
+    mid = pd.Timestamp(os.environ.get("MID", "2025-09-01"), tz="UTC")
     r1 = sorted(((stats(window(t, df.index[0], mid))["net"], k) for k, t in ALL.items()), reverse=True)
     r2 = sorted(((stats(window(t, mid, df.index[-1]))["net"], k) for k, t in ALL.items()), reverse=True)
     rank1 = [k for _, k in r1].index(key(LIVE)) + 1; rank2 = [k for _, k in r2].index(key(LIVE)) + 1

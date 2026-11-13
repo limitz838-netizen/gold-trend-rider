@@ -1,0 +1,1 @@
+account 105505352 server FBS-Demo symbol XAUUSD digits=2 point=0.01 contract=100.0 maxbars=100000000 exported 2026-11-11T11:58:36.733188+00:00
